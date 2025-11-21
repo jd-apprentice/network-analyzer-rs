@@ -2,10 +2,14 @@ use super::models::{Device, NetworkTopology};
 use dns_lookup::lookup_addr;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::AsyncResolver;
-use pnet::datalink;
+use pnet::datalink::{self, MacAddr};
+use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket};
+use pnet::packet::ethernet::{EthernetPacket, MutableEthernetPacket};
+use pnet::packet::{MutablePacket, Packet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
-use tokio::net::TcpStream as TokioTcpStream;
+use tokio::net::{TcpStream as TokioTcpStream, UdpSocket as TokioUdpSocket};
+use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
 
 pub async fn get_local_network_info() -> Option<(IpAddr, IpAddr, String)> {
@@ -45,21 +49,46 @@ async fn check_tcp_port(ip: IpAddr, port: u16, timeout_ms: u64) -> bool {
     }
 }
 
+async fn check_udp_port(ip: IpAddr, port: u16, timeout_ms: u64) -> bool {
+    let bind_addr = if ip.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    match TokioUdpSocket::bind(bind_addr).await {
+        Ok(socket) => {
+            let _ = socket.send_to(&[], format!("{}:{}", ip, port)).await;
+            match timeout(
+                Duration::from_millis(timeout_ms),
+                socket.recv_from(&mut [0u8; 0]),
+            )
+            .await
+            {
+                Ok(Ok(_)) => true,
+                _ => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
 pub async fn scan_host(ip: IpAddr) -> Option<Device> {
     let start_time = Instant::now();
 
-    // Enhanced reachability check and port collection
-    let interesting_ports = vec![
+    let tcp_ports_to_scan = vec![
         21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 1723, 3128, 3306, 3389,
-        5432, 5900, 8000, 8080, 8443, 8888, // Common ports
-        10000, 20000, // Webmin, Virtualmin
-        8006,  // Proxmox web interface
+        5432, 5900, 8000, 8080, 8443, 8888, 10000, 20000, 8006,
     ];
+    let udp_ports_to_scan = vec![53, 67, 68, 69, 123, 161, 162, 500, 1701, 4500, 5353, 5678];
+
     let mut open_ports: Vec<u16> = Vec::new();
     let mut is_reachable = false;
 
-    for port in interesting_ports.iter() {
+    for port in tcp_ports_to_scan.iter() {
         if check_tcp_port(ip, *port, 300).await {
+            open_ports.push(*port);
+            is_reachable = true;
+        }
+    }
+
+    for port in udp_ports_to_scan.iter() {
+        if check_udp_port(ip, *port, 300).await {
             open_ports.push(*port);
             is_reachable = true;
         }
@@ -131,20 +160,128 @@ async fn get_hostname(ip: IpAddr) -> Option<String> {
 }
 
 async fn get_mac_address(ip: IpAddr) -> Option<String> {
-    for iface in datalink::interfaces() {
-        if let Some(mac) = iface.mac {
-            for ip_network in &iface.ips {
-                if ip_network.ip() == ip {
-                    return Some(mac.to_string());
-                }
-            }
+    if !ip.is_ipv4() {
+        eprintln!(
+            "DEBUG: ARP scan not supported for IPv6 addresses. No MAC address found for {}.",
+            ip
+        );
+        return None;
+    }
+
+    let local_ip_info = get_local_network_info().await?;
+    let local_ipv4 = match local_ip_info.0 {
+        IpAddr::V4(ipv4) => ipv4,
+        _ => return None,
+    };
+
+    let local_interface = datalink::interfaces()
+        .into_iter()
+        .find(|iface| iface.ips.iter().any(|ip_n| ip_n.ip() == local_ip_info.0))?;
+
+    let sender_mac = local_interface.mac?;
+    let target_ipv4 = match ip {
+        IpAddr::V4(ipv4) => ipv4,
+        _ => return None,
+    };
+
+    let (response_tx, response_rx) = oneshot::channel();
+
+    tokio::spawn(arp_scan(
+        local_interface.name.clone(), // Clone the String
+        target_ipv4,
+        local_ipv4,
+        sender_mac,
+        response_tx,
+    ));
+
+    match timeout(Duration::from_millis(1000), response_rx).await {
+        Ok(Ok((_ip, mac))) => {
+            eprintln!("DEBUG: Found MAC address for {} using ARP: {}", ip, mac);
+            Some(mac.to_string())
+        }
+        _ => {
+            eprintln!("DEBUG: No MAC address found for {} using ARP.", ip);
+            None
         }
     }
-    eprintln!(
-        "DEBUG: No MAC address found for {}. (Only local interfaces are checked).",
-        ip
-    );
-    None
+}
+
+async fn arp_scan(
+    interface_name: String, // Changed to owned String
+    target_ip: Ipv4Addr,
+    sender_ip: Ipv4Addr,
+    sender_mac: MacAddr,
+    response_tx: oneshot::Sender<(Ipv4Addr, MacAddr)>,
+) {
+    let interfaces = datalink::interfaces();
+    let interface = interfaces
+        .into_iter()
+        .filter(|iface| iface.name == interface_name)
+        .next()
+        .expect("Failed to get interface");
+
+    let (mut tx, _rx) = match datalink::channel(&interface, Default::default()) {
+        Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
+        Ok(_) => panic!("Unknown channel type"),
+        Err(e) => panic!("Error creating datalink channel: {}", e),
+    };
+
+    let mut ethernet_buffer = [0u8; 42];
+    let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+
+    let mut arp_buffer = [0u8; 28];
+    let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
+
+    // Build ARP request
+    arp_packet.set_hardware_type(pnet::packet::arp::ArpHardwareType::new(1));
+    arp_packet.set_protocol_type(pnet::packet::ethernet::EtherType::new(0x0800));
+    arp_packet.set_hw_addr_len(6);
+    arp_packet.set_proto_addr_len(4);
+    arp_packet.set_operation(ArpOperations::Request);
+    arp_packet.set_sender_hw_addr(sender_mac);
+    arp_packet.set_sender_proto_addr(sender_ip);
+    arp_packet.set_target_hw_addr(MacAddr::broadcast());
+    arp_packet.set_target_proto_addr(target_ip);
+
+    // Build Ethernet header
+    ethernet_packet.set_destination(MacAddr::broadcast());
+    ethernet_packet.set_source(sender_mac);
+    ethernet_packet.set_ethertype(pnet::packet::ethernet::EtherType::new(1));
+    ethernet_packet.set_payload(arp_packet.packet_mut());
+
+    tx.send_to(ethernet_packet.packet(), None);
+
+    // Listen for ARP reply
+    let (mut _tx, mut rx) = match datalink::channel(&interface, Default::default()) {
+        Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
+        Ok(_) => panic!("Unknown channel type"),
+        Err(e) => panic!("Error creating datalink channel: {}", e),
+    };
+
+    let response_timeout = Duration::from_millis(500); // Shorter timeout for ARP responses
+    let start_time = Instant::now();
+
+    while start_time.elapsed() < response_timeout {
+        match rx.next() {
+            Ok(packet) => {
+                if let Some(ethernet_packet) = EthernetPacket::new(packet) {
+                    if ethernet_packet.get_ethertype() == pnet::packet::ethernet::EtherType::new(1)
+                    {
+                        if let Some(arp) = ArpPacket::new(ethernet_packet.payload()) {
+                            if arp.get_operation() == ArpOperations::Reply
+                                && arp.get_sender_proto_addr() == target_ip
+                            {
+                                let _ = response_tx
+                                    .send((arp.get_sender_proto_addr(), arp.get_sender_hw_addr()));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => eprintln!("Error receiving packet: {:?}", e),
+        }
+    }
 }
 
 fn determine_device_type(hostname: Option<&String>, open_ports: &[u16]) -> String {
@@ -213,19 +350,39 @@ fn determine_device_type(hostname: Option<&String>, open_ports: &[u16]) -> Strin
     "Unknown".to_string()
 }
 
-pub async fn scan_network() -> Option<NetworkTopology> {
-    let (local_ip, gateway_ip, subnet) = get_local_network_info().await?;
-    let base_ip = match local_ip {
-        IpAddr::V4(ipv4) => {
-            let parts: Vec<u8> = ipv4.octets().to_vec();
-            format!("{}.{}.{}", parts[0], parts[1], parts[2])
+pub async fn scan_network(target_subnet: Option<String>) -> Option<NetworkTopology> {
+    let (_local_ip, gateway_ip, default_subnet) = get_local_network_info().await?;
+    let subnet_to_scan = target_subnet.unwrap_or(default_subnet);
+
+    let network: ipnetwork::IpNetwork = subnet_to_scan.parse().ok()?;
+    let mut hosts: Vec<IpAddr> = Vec::new();
+
+    match network {
+        ipnetwork::IpNetwork::V4(ipv4_network) => {
+            let base_ip_octets = ipv4_network.network().octets();
+            for i in 1..=254 {
+                // Iterate through the last octet for a /24 subnet (common case)
+                let ip_str = format!(
+                    "{}.{}.{}.{}",
+                    base_ip_octets[0], base_ip_octets[1], base_ip_octets[2], i
+                );
+                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                    hosts.push(ip);
+                }
+            }
         }
-        _ => return None,
-    };
+        ipnetwork::IpNetwork::V6(_) => {
+            eprintln!(
+                "DEBUG: IPv6 network scanning is not yet fully implemented for custom ranges."
+            );
+            // For now, if IPv6, we'll return None or handle a specific default.
+            // A more robust implementation would involve iterating IPv6 ranges.
+            return None;
+        }
+    }
 
     let mut handles = Vec::new();
-    for i in 1..=254 {
-        let ip: IpAddr = format!("{}.{}", base_ip, i).parse().unwrap();
+    for ip in hosts {
         let handle = tokio::spawn(async move { scan_host(ip).await });
         handles.push(handle);
     }
@@ -242,7 +399,7 @@ pub async fn scan_network() -> Option<NetworkTopology> {
     Some(NetworkTopology {
         devices,
         gateway: gateway_ip,
-        subnet,
+        subnet: subnet_to_scan,
         total_devices,
         links: None,
     })

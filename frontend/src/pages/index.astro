@@ -14,6 +14,10 @@ import Layout from "../layouts/Layout.astro";
 		</div>
 
 		<div class="controls">
+			<div class="input-group">
+				<label for="subnetInput">Subnet (e.g., 192.168.1.0/24):</label>
+				<input type="text" id="subnetInput" placeholder="Optional" />
+			</div>
 			<button id="scanBtn" onclick="startScan()"
 				><rux-icon-travel-explore size="1.5rem"
 				></rux-icon-travel-explore> Scan Network</button
@@ -37,6 +41,8 @@ import Layout from "../layouts/Layout.astro";
 		async function startScan() {
 			const btn = document.getElementById("scanBtn");
 			const status = document.getElementById("status");
+			const subnetInput = document.getElementById("subnetInput");
+			const subnet = subnetInput.value.trim();
 
 			btn.disabled = true;
 			status.textContent =
@@ -44,7 +50,11 @@ import Layout from "../layouts/Layout.astro";
 			status.className = "status scanning";
 
 			try {
-				const response = await fetch("http://localhost:8080/api/scan");
+				let url = "http://localhost:8080/api/scan";
+				if (subnet) {
+					url = `http://localhost:8080/api/scan/${subnet}`;
+				}
+				const response = await fetch(url);
 				const data = await response.json();
 
 				if (!response.ok || data.error) {
@@ -75,18 +85,19 @@ import Layout from "../layouts/Layout.astro";
 			const routerGateway = data.devices.filter((d) =>
 				d.device_type.includes("Router/Gateway"),
 			).length;
+
 			const desktops = data.devices.filter((d) =>
 				d.device_type.includes("Desktop"),
 			).length;
+
 			const mobiles = data.devices.filter((d) =>
 				d.device_type.includes("Mobile"),
 			).length;
+
 			const servers = data.devices.filter((d) =>
 				d.device_type.includes("Server"),
 			).length;
-			const proxmoxServers = data.devices.filter((d) =>
-				d.device_type.includes("Proxmox Server"),
-			).length;
+
 			const unknown = data.devices.filter((d) =>
 				d.device_type.includes("Unknown"),
 			).length;
@@ -121,10 +132,6 @@ import Layout from "../layouts/Layout.astro";
                     <div class="stat-value">${servers}</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Proxmox Servers</div>
-                    <div class="stat-value">${proxmoxServers}</div>
-                </div>
-                <div class="stat-card">
                     <div class="stat-label">Unknown</div>
                     <div class="stat-value">${unknown}</div>
                 </div>
@@ -135,7 +142,6 @@ import Layout from "../layouts/Layout.astro";
 			if (deviceType.includes("Router/Gateway")) return "router";
 			if (deviceType.includes("Desktop")) return "desktop-windows";
 			if (deviceType.includes("Mobile")) return "smartphone";
-			if (deviceType.includes("Proxmox Server")) return "server";
 			if (deviceType.includes("SSH Server")) return "terminal";
 			if (deviceType.includes("Web Server")) return "public";
 			if (deviceType.includes("MySQL Server")) return "database";
@@ -246,7 +252,9 @@ import Layout from "../layouts/Layout.astro";
 							`
                             <strong>${d.label}</strong><br>
                             IP: ${d.id}<br>
+                            MAC: ${d.mac || "N/A"}<br>
                             Type: ${d.device_type || "Gateway"}<br>
+                            ${d.open_ports && d.open_ports.length > 0 ? `Open Ports: ${d.open_ports.join(", ")}<br>` : ""}
                         `,
 						)
 						.style("left", event.pageX + 10 + "px")
@@ -315,7 +323,8 @@ import Layout from "../layouts/Layout.astro";
 				item.innerHTML = `
                     <strong><rux-icon-${getDeviceIcon(device.device_type)} size="1.5rem"></rux-icon-${getDeviceIcon(device.device_type)}> ${device.hostname || device.ip}</strong>
                     <div style="color:#666; font-size:0.9em; margin-top:5px">
-                        IP: ${device.ip} | Type: ${device.device_type}
+                        IP: ${device.ip} | MAC: ${device.mac || "N/A"} | Type: ${device.device_type}
+                        ${device.open_ports && device.open_ports.length > 0 ? `<br>Open Ports: ${device.open_ports.join(", ")}` : ""}
                     </div>
                 `;
 				listDiv.appendChild(item);
