@@ -3,7 +3,7 @@
     "version": "1.0.0",
     "description": "Monorepo for Rust backend and Astro frontend",
     "scripts": {
-        "install": "bun --cwd frontend install",
+        "install:frontend": "bun install --cwd frontend/",
         "dev": "concurrently \"cd backend && watchexec -e rs cargo run\" \"cd frontend && bun dev\"",
         "build": "cargo build --manifest-path backend/Cargo.toml && bun --cwd frontend build",
         "prepare": "husky"
