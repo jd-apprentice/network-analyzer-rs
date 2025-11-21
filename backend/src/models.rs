@@ -7,7 +7,6 @@ pub struct Device {
     pub hostname: Option<String>,
     pub mac: Option<String>,
     pub device_type: String,
-    pub ports: Vec<u16>,
     pub latency: f32,
 }
 

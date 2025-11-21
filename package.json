@@ -1,0 +1,18 @@
+{
+    "name": "network-rs",
+    "version": "1.0.0",
+    "description": "Monorepo for Rust backend and Astro frontend",
+    "scripts": {
+        "install": "bun --cwd frontend install",
+        "dev": "concurrently \"cd backend && watchexec -e rs cargo run\" \"cd frontend && bun dev\"",
+        "build": "cargo build --manifest-path backend/Cargo.toml && bun --cwd frontend build",
+        "prepare": "husky"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "MIT",
+    "devDependencies": {
+        "concurrently": "^9.2.1",
+        "husky": "^9.1.7"
+    }
+}

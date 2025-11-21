@@ -1,10 +1,8 @@
 use super::models::{Device, NetworkTopology};
 use pnet::datalink;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
-use tokio::net::TcpStream;
+use std::time::Instant;
 use tokio::process::Command;
-use tokio::time::timeout;
 
 pub async fn get_local_network_info() -> Option<(IpAddr, IpAddr, String)> {
     for iface in datalink::interfaces() {
@@ -31,22 +29,22 @@ pub async fn get_local_network_info() -> Option<(IpAddr, IpAddr, String)> {
 }
 
 pub async fn scan_host(ip: IpAddr) -> Option<Device> {
+    let start_time = Instant::now(); // Initialize start_time
     let hostname = get_hostname(ip).await;
     let mac = get_mac_address(ip).await;
-    let (ports, latency) = scan_common_ports(ip).await;
+    let latency = start_time.elapsed().as_secs_f32() * 1000.0 / 254.0; // Approximate latency without port scanning
 
-    if ports.is_empty() && hostname.is_none() && mac.is_none() {
+    if hostname.is_none() && mac.is_none() {
         return None;
     }
 
-    let device_type = determine_device_type(&ports, hostname.as_ref());
+    let device_type = determine_device_type(hostname.as_ref());
 
     Some(Device {
         ip,
         hostname,
         mac,
         device_type,
-        ports,
         latency,
     })
 }
@@ -118,64 +116,29 @@ async fn get_mac_address(ip: IpAddr) -> Option<String> {
     None
 }
 
-async fn scan_common_ports(ip: IpAddr) -> (Vec<u16>, f32) {
-    let common_ports = [21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 3389, 8080];
-    let mut open_ports = Vec::new();
-    let start_time = tokio::time::Instant::now();
-
-    for port in common_ports {
-        let addr = format!("{}:{}", ip, port);
-        if timeout(Duration::from_millis(200), TcpStream::connect(&addr))
-            .await
-            .is_ok()
-        {
-            open_ports.push(port);
-        }
-    }
-    let latency = start_time.elapsed().as_secs_f32() * 1000.0 / common_ports.len() as f32;
-    (open_ports, latency)
-}
-
-fn determine_device_type(ports: &[u16], hostname: Option<&String>) -> String {
-    let mut device_types = Vec::new();
-
-    if ports.contains(&80) || ports.contains(&443) || ports.contains(&8080) {
-        device_types.push("Web Server");
-    }
-    if ports.contains(&22) {
-        device_types.push("SSH Server");
-    }
-    if ports.contains(&3389) {
-        device_types.push("Remote Desktop");
-    }
-    if ports.contains(&53) {
-        device_types.push("DNS Server");
-    }
-    if ports.contains(&21) {
-        device_types.push("FTP Server");
-    }
-    if ports.contains(&23) {
-        device_types.push("Telnet Server");
-    }
-
+fn determine_device_type(hostname: Option<&String>) -> String {
     if let Some(h) = hostname {
         let lower_h = h.to_lowercase();
         if lower_h.contains("router") || lower_h.contains("gateway") {
-            device_types.push("Router/Gateway");
+            return "Router/Gateway".to_string();
         }
         if lower_h.contains("printer") {
-            device_types.push("Printer");
+            return "Printer".to_string();
         }
         if lower_h.contains("nas") {
-            device_types.push("NAS");
+            return "NAS".to_string();
+        }
+        if lower_h.contains("desktop") || lower_h.contains("pc") || lower_h.contains("computer") {
+            return "Desktop".to_string();
+        }
+        if lower_h.contains("mobile") || lower_h.contains("phone") || lower_h.contains("tablet") {
+            return "Mobile".to_string();
+        }
+        if lower_h.contains("server") {
+            return "Server".to_string();
         }
     }
-
-    if device_types.is_empty() {
-        "Unknown".to_string()
-    } else {
-        device_types.join(", ")
-    }
+    "Unknown".to_string()
 }
 
 pub async fn scan_network() -> Option<NetworkTopology> {
