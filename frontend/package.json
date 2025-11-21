@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.11",
+    "@astrouxds/astro-web-components": "^7.27.0",
     "astro": "^5.16.0"
   }
 }

@@ -8,7 +8,9 @@ actix-web = "4.4"
 actix-cors = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "net", "time", "process"] }
+tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "net", "time", "process", "sync"] }
 pnet = "0.34"
 ipnetwork = "0.20"
 local-ip-address = "0.5"
+hickory-resolver = "0.24"
+dns-lookup = "2.0"

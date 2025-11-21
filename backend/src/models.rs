@@ -8,6 +8,7 @@ pub struct Device {
     pub mac: Option<String>,
     pub device_type: String,
     pub latency: f32,
+    pub open_ports: Vec<u16>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

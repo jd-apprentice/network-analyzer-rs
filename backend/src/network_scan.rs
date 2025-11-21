@@ -1,8 +1,12 @@
 use super::models::{Device, NetworkTopology};
+use dns_lookup::lookup_addr;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::AsyncResolver;
 use pnet::datalink;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
-use tokio::process::Command;
+use tokio::net::TcpStream as TokioTcpStream;
+use tokio::time::{timeout, Duration};
 
 pub async fn get_local_network_info() -> Option<(IpAddr, IpAddr, String)> {
     for iface in datalink::interfaces() {
@@ -28,17 +32,48 @@ pub async fn get_local_network_info() -> Option<(IpAddr, IpAddr, String)> {
     None
 }
 
-pub async fn scan_host(ip: IpAddr) -> Option<Device> {
-    let start_time = Instant::now(); // Initialize start_time
-    let hostname = get_hostname(ip).await;
-    let mac = get_mac_address(ip).await;
-    let latency = start_time.elapsed().as_secs_f32() * 1000.0 / 254.0; // Approximate latency without port scanning
+async fn check_tcp_port(ip: IpAddr, port: u16, timeout_ms: u64) -> bool {
+    let addr = format!("{}:{}", ip, port);
+    match timeout(
+        Duration::from_millis(timeout_ms),
+        TokioTcpStream::connect(addr),
+    )
+    .await
+    {
+        Ok(Ok(_)) => true,
+        _ => false,
+    }
+}
 
-    if hostname.is_none() && mac.is_none() {
+pub async fn scan_host(ip: IpAddr) -> Option<Device> {
+    let start_time = Instant::now();
+
+    // Enhanced reachability check and port collection
+    let interesting_ports = vec![
+        21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 1723, 3128, 3306, 3389,
+        5432, 5900, 8000, 8080, 8443, 8888, // Common ports
+        10000, 20000, // Webmin, Virtualmin
+        8006,  // Proxmox web interface
+    ];
+    let mut open_ports: Vec<u16> = Vec::new();
+    let mut is_reachable = false;
+
+    for port in interesting_ports.iter() {
+        if check_tcp_port(ip, *port, 300).await {
+            open_ports.push(*port);
+            is_reachable = true;
+        }
+    }
+
+    if !is_reachable {
         return None;
     }
 
-    let device_type = determine_device_type(hostname.as_ref());
+    let hostname = get_hostname(ip).await;
+    let mac = get_mac_address(ip).await;
+    let latency = start_time.elapsed().as_secs_f32() * 1000.0 / 254.0; // Approximate latency
+
+    let device_type = determine_device_type(hostname.as_ref(), &open_ports);
 
     Some(Device {
         ip,
@@ -46,77 +81,73 @@ pub async fn scan_host(ip: IpAddr) -> Option<Device> {
         mac,
         device_type,
         latency,
+        open_ports,
     })
 }
 
 async fn get_hostname(ip: IpAddr) -> Option<String> {
-    let output = Command::new("dig")
-        .arg("-x")
-        .arg(ip.to_string())
-        .arg("+short")
-        .output()
-        .await;
-
-    if let Ok(output) = output {
-        if output.status.success() {
-            let result = String::from_utf8_lossy(&output.stdout);
-            let hostname = result.trim().trim_end_matches('.');
-            if !hostname.is_empty() {
-                return Some(hostname.to_string());
-            }
+    if let Ok(host) = lookup_addr(&ip) {
+        if !host.is_empty() && host != ip.to_string() {
+            eprintln!(
+                "DEBUG: Found hostname for {} using dns-lookup: {}",
+                ip, host
+            );
+            return Some(host);
         }
+    } else {
+        eprintln!("DEBUG: dns-lookup failed for {}.", ip);
     }
 
-    let output = Command::new("nmblookup")
-        .arg("-A")
-        .arg(ip.to_string())
-        .output()
-        .await;
+    let resolver = match AsyncResolver::from_system_conf(TokioConnectionProvider::default()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "ERROR: Failed to create DNS resolver from system config: {:?}",
+                e
+            );
+            return None;
+        }
+    };
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            let result = String::from_utf8_lossy(&output.stdout);
-            for line in result.lines() {
-                if line.contains("<20> (active)") {
-                    if let Some(start) = line.find(" ") {
-                        if let Some(end) = line[start..].find(" ") {
-                            let hostname = line[start..start + end].trim();
-                            if !hostname.is_empty() && hostname != ip.to_string() {
-                                return Some(hostname.to_string());
-                            }
-                        }
-                    }
+    match resolver.reverse_lookup(ip).await {
+        Ok(response) => {
+            if let Some(name) = response.iter().next() {
+                let hostname = name.to_string().trim_end_matches('.').to_string();
+                if !hostname.is_empty() && hostname != ip.to_string() {
+                    eprintln!(
+                        "DEBUG: Found hostname for {} using hickory-resolver: {}",
+                        ip, hostname
+                    );
+                    return Some(hostname);
                 }
             }
         }
+        Err(e) => {
+            eprintln!("DEBUG: hickory-resolver failed for {}: {:?}", ip, e);
+        }
     }
+
     None
 }
 
 async fn get_mac_address(ip: IpAddr) -> Option<String> {
-    let output = Command::new("arp")
-        .arg("-n")
-        .arg(ip.to_string())
-        .output()
-        .await;
-
-    if let Ok(output) = output {
-        if output.status.success() {
-            let result = String::from_utf8_lossy(&output.stdout);
-            for line in result.lines() {
-                if line.contains(ip.to_string().as_str()) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 && parts[2] != "(incomplete)" {
-                        return Some(parts[2].to_string());
-                    }
+    for iface in datalink::interfaces() {
+        if let Some(mac) = iface.mac {
+            for ip_network in &iface.ips {
+                if ip_network.ip() == ip {
+                    return Some(mac.to_string());
                 }
             }
         }
     }
+    eprintln!(
+        "DEBUG: No MAC address found for {}. (Only local interfaces are checked).",
+        ip
+    );
     None
 }
 
-fn determine_device_type(hostname: Option<&String>) -> String {
+fn determine_device_type(hostname: Option<&String>, open_ports: &[u16]) -> String {
     if let Some(h) = hostname {
         let lower_h = h.to_lowercase();
         if lower_h.contains("router") || lower_h.contains("gateway") {
@@ -134,10 +165,51 @@ fn determine_device_type(hostname: Option<&String>) -> String {
         if lower_h.contains("mobile") || lower_h.contains("phone") || lower_h.contains("tablet") {
             return "Mobile".to_string();
         }
+        if lower_h.contains("pve") || open_ports.contains(&8006) {
+            return "Proxmox Server".to_string();
+        }
         if lower_h.contains("server") {
             return "Server".to_string();
         }
     }
+
+    if open_ports.contains(&22) {
+        return "SSH Server".to_string();
+    }
+    if open_ports.contains(&80) || open_ports.contains(&443) {
+        return "Web Server".to_string();
+    }
+    if open_ports.contains(&3306) {
+        return "MySQL Server".to_string();
+    }
+    if open_ports.contains(&5432) {
+        return "PostgreSQL Server".to_string();
+    }
+    if open_ports.contains(&3389) {
+        return "RDP Host".to_string();
+    }
+    if open_ports.contains(&5900) {
+        return "VNC Host".to_string();
+    }
+    if open_ports.contains(&21) {
+        return "FTP Server".to_string();
+    }
+    if open_ports.contains(&23) {
+        return "Telnet Server".to_string();
+    }
+    if open_ports.contains(&25) {
+        return "SMTP Server".to_string();
+    }
+    if open_ports.contains(&110) {
+        return "POP3 Server".to_string();
+    }
+    if open_ports.contains(&143) {
+        return "IMAP Server".to_string();
+    }
+    if open_ports.contains(&139) || open_ports.contains(&445) {
+        return "SMB/Samba Server".to_string();
+    }
+
     "Unknown".to_string()
 }
 
