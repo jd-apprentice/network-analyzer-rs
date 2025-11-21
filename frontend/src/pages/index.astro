@@ -1,0 +1,468 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout title="Network Analyzer">
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"
+	></script>
+	<div class="container">
+		<div class="header">
+			<h1>🌐 Local Network Analyzer</h1>
+			<p>Discover and visualize all devices on your network</p>
+		</div>
+
+		<div class="controls">
+			<button id="scanBtn" onclick="startScan()">🔍 Scan Network</button>
+			<div id="status" class="status">Ready to scan</div>
+		</div>
+
+		<div id="stats" class="stats" style="display:none;"></div>
+
+		<svg id="network-graph"></svg>
+
+		<div id="device-list" class="device-list"></div>
+	</div>
+
+	<div id="tooltip" class="tooltip"></div>
+
+	<script is:inline>
+		// D3.js and other scripts will go here
+		let topology = null;
+
+		async function startScan() {
+			const btn = document.getElementById("scanBtn");
+			const status = document.getElementById("status");
+
+			btn.disabled = true;
+			status.textContent =
+				"⏳ Scanning network... This may take a moment";
+			status.className = "status scanning";
+
+			try {
+				const response = await fetch("http://localhost:8080/api/scan");
+				const data = await response.json();
+
+				if (!response.ok || data.error) {
+					throw new Error(data.error || "Unknown error occurred");
+				}
+
+				topology = data;
+
+				status.textContent = `✅ Scan complete - ${topology.total_devices} devices found`;
+				status.className = "status complete";
+
+				displayStats(topology);
+				visualizeNetwork(topology);
+				displayDeviceList(topology);
+			} catch (error) {
+				status.textContent = `❌ Error: ${error.message}`;
+				status.className = "status error";
+				console.error("Scan failed:", error);
+			} finally {
+				btn.disabled = false;
+			}
+		}
+
+		function displayStats(data) {
+			const statsDiv = document.getElementById("stats");
+			statsDiv.style.display = "grid";
+
+			const routerGateway = data.devices.filter((d) =>
+				d.device_type.includes("Router/Gateway"),
+			).length;
+			const desktops = data.devices.filter((d) =>
+				d.device_type.includes("Desktop"),
+			).length;
+			const mobiles = data.devices.filter((d) =>
+				d.device_type.includes("Mobile"),
+			).length;
+			const servers = data.devices.filter((d) =>
+				d.device_type.includes("Server"),
+			).length;
+			const unknown = data.devices.filter((d) =>
+				d.device_type.includes("Unknown"),
+			).length;
+
+			statsDiv.innerHTML = `
+                <div class="stat-card">
+                    <div class="stat-label">Total Devices</div>
+                    <div class="stat-value">${data.total_devices}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Gateway</div>
+                    <div class="stat-value" style="font-size:1.5em">${data.gateway}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Subnet</div>
+                    <div class="stat-value" style="font-size:1.5em">${data.subnet}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Routers/Gateways</div>
+                    <div class="stat-value">${routerGateway}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Desktops</div>
+                    <div class="stat-value">${desktops}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Mobiles</div>
+                    <div class="stat-value">${mobiles}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Servers</div>
+                    <div class="stat-value">${servers}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Unknown</div>
+                    <div class="stat-value">${unknown}</div>
+                </div>
+            `;
+		}
+
+		function getDeviceIcon(deviceType) {
+			if (deviceType.includes("Router/Gateway")) return "🏠";
+			if (deviceType.includes("Desktop")) return "💻";
+			if (deviceType.includes("Mobile")) return "📱";
+			if (deviceType.includes("Server")) return "🖥️";
+			if (deviceType.includes("Printer")) return "🖨️";
+			if (deviceType.includes("NAS")) return "💾";
+			return "❓"; // Unknown device
+		}
+
+		function visualizeNetwork(data) {
+			const tooltip = d3.select("#tooltip");
+			const svg = d3.select("#network-graph");
+			svg.selectAll("*").remove();
+
+			const width = svg.node().getBoundingClientRect().width;
+			const height = 700;
+
+			const nodes = [
+				{
+					id: data.gateway,
+					type: "gateway",
+					label: "🌐 Gateway",
+					...data,
+				},
+				...data.devices.map((d) => ({
+					id: d.ip,
+					type: "device",
+					label: d.hostname || d.ip,
+					icon: getDeviceIcon(d.device_type),
+					...d,
+				})),
+			];
+
+			const links = data.devices.map((d) => ({
+				source: data.gateway,
+				target: d.ip,
+			}));
+
+			const simulation = d3
+				.forceSimulation(nodes)
+				.force(
+					"link",
+					d3
+						.forceLink(links)
+						.id((d) => d.id)
+						.distance(150),
+				)
+				.force("charge", d3.forceManyBody().strength(-300))
+				.force("center", d3.forceCenter(width / 2, height / 2))
+				.force("collision", d3.forceCollide().radius(50));
+
+			const link = svg
+				.append("g")
+				.selectAll("line")
+				.data(links)
+				.enter()
+				.append("line")
+				.attr("class", "link")
+				.attr("stroke-width", 2);
+
+			const node = svg
+				.append("g")
+				.selectAll("g")
+				.data(nodes)
+				.enter()
+				.append("g")
+				.attr("class", "node")
+				.call(
+					d3
+						.drag()
+						.on("start", dragstarted)
+						.on("drag", dragged)
+						.on("end", dragended),
+				);
+
+			node.append("circle")
+				.attr("r", (d) => (d.type === "gateway" ? 30 : 20))
+				.attr("fill", (d) => {
+					if (d.type === "gateway") return "#667eea";
+					// More detailed color logic could be added here based on device type
+					if (d.device_type.includes("Router/Gateway"))
+						return "#5a67d8";
+					if (d.device_type.includes("Desktop")) return "#ff6b6b";
+					if (d.device_type.includes("Mobile")) return "#51cf66";
+					if (d.device_type.includes("Server")) return "#ffd43b";
+					return "#868e96";
+				})
+				.attr("stroke", "#fff")
+				.attr("stroke-width", 3)
+				.on("mouseover", function (event, d) {
+					tooltip
+						.style("opacity", 1)
+						.html(
+							`
+                            <strong>${d.label}</strong><br>
+                            IP: ${d.ip}<br>
+                            Type: ${d.device_type || "Gateway"}<br>
+                        `,
+						)
+						.style("left", event.pageX + 10 + "px")
+						.style("top", event.pageY - 10 + "px");
+				})
+				.on("mouseout", function () {
+					tooltip.style("opacity", 0);
+				});
+
+			node.append("text")
+				.attr("dy", (d) => (d.type === "gateway" ? "-35" : "-25"))
+				.attr("text-anchor", "middle")
+				.text((d) => d.label);
+
+			node.append("text")
+				.attr("class", "node-icon")
+				.attr("font-size", (d) =>
+					d.type === "gateway" ? "24px" : "18px",
+				)
+				.attr("text-anchor", "middle")
+				.attr("alignment-baseline", "middle")
+				.text((d) => d.icon || "");
+
+			simulation.on("tick", () => {
+				link.attr("x1", (d) => d.source.x)
+					.attr("y1", (d) => d.source.y)
+					.attr("x2", (d) => d.target.x)
+					.attr("y2", (d) => d.target.y);
+
+				node.attr("transform", (d) => `translate(${d.x},${d.y})`);
+			});
+		}
+
+		let simulation;
+
+		function dragstarted(event, d) {
+			if (!event.active) simulation.alphaTarget(0.3).restart();
+			d.fx = d.x;
+			d.fy = d.y;
+		}
+
+		function dragged(event, d) {
+			d.fx = event.x;
+			d.fy = event.y;
+		}
+
+		function dragended(event, d) {
+			if (!event.active) simulation.alphaTarget(0);
+			d.fx = null;
+			d.fy = null;
+		}
+
+		function displayDeviceList(data) {
+			const listDiv = document.getElementById("device-list");
+			listDiv.innerHTML =
+				'<h2 style="margin-bottom:20px">📋 Detected Devices</h2>';
+
+			for (const device of data.devices) {
+				const item = document.createElement("div");
+				item.className = "device-item";
+				item.innerHTML = `
+                    <strong>${getDeviceIcon(device.device_type)} ${device.hostname || device.ip}</strong>
+                    <div style="color:#666; font-size:0.9em; margin-top:5px">
+                        IP: ${device.ip} | Type: ${device.device_type}
+                    </div>
+                `;
+				listDiv.appendChild(item);
+			}
+		}
+	</script>
+</Layout>
+
+<style is:global>
+	* {
+		margin: 0;
+		padding: 0;
+		box-sizing: border-box;
+	}
+
+	body {
+		font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+		background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+		min-height: 100vh;
+		padding: 20px;
+	}
+
+	.container {
+		max-width: 1400px;
+		margin: 0 auto;
+		background: white;
+		border-radius: 20px;
+		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+		overflow: hidden;
+	}
+
+	.header {
+		background: linear-gradient(135deg, #5a67d8 0%, #6c4299 100%);
+		color: white;
+		padding: 30px;
+		text-align: center;
+	}
+
+	h1 {
+		font-size: 2.5em;
+		margin-bottom: 10px;
+		text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
+	}
+
+	.controls {
+		padding: 20px 30px;
+		background: #f8f9fa;
+		border-bottom: 2px solid #e9ecef;
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 15px;
+	}
+
+	button {
+		background: linear-gradient(135deg, #5a67d8 0%, #6c4299 100%);
+		color: white;
+		border: none;
+		padding: 12px 30px;
+		border-radius: 25px;
+		font-size: 1em;
+		cursor: pointer;
+		transition: all 0.3s;
+		box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+	}
+
+	button:hover {
+		transform: translateY(-2px);
+		box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+	}
+
+	button:disabled {
+		background: #ccc;
+		cursor: not-allowed;
+		transform: none;
+	}
+
+	.status {
+		padding: 10px 20px;
+		background: #e7f5ff;
+		border-radius: 20px;
+		color: #1971c2;
+		font-weight: 600;
+	}
+
+	.status.scanning {
+		background: #fff9db;
+		color: #854d0e;
+	}
+
+	.status.complete {
+		background: #d3f9d8;
+		color: #1c7430;
+	}
+
+	.status.error {
+		background: #ffe0e0;
+		color: #a50e0e;
+	}
+
+	#network-graph {
+		width: 100%;
+		height: 700px;
+		background: #f8f9fa;
+	}
+
+	.stats {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+		gap: 20px;
+		padding: 30px;
+		background: white;
+	}
+
+	.stat-card {
+		background: linear-gradient(135deg, #5a67d8 0%, #6c4299 100%);
+		color: white;
+		padding: 20px;
+		border-radius: 15px;
+		text-align: center;
+		box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+	}
+
+	.stat-value {
+		font-size: 2.5em;
+		font-weight: bold;
+		margin: 10px 0;
+	}
+
+	.stat-label {
+		font-size: 0.9em;
+		opacity: 0.9;
+	}
+
+	.device-list {
+		padding: 30px;
+	}
+
+	.device-item {
+		background: #f8f9fa;
+		padding: 15px;
+		margin: 10px 0;
+		border-radius: 10px;
+		border-left: 4px solid #667eea;
+		transition: all 0.3s;
+	}
+
+	.device-item:hover {
+		transform: translateX(5px);
+		box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+	}
+
+	.tooltip {
+		position: absolute;
+		background: rgba(0, 0, 0, 0.9);
+		color: white;
+		padding: 10px 15px;
+		border-radius: 8px;
+		font-size: 0.9em;
+		pointer-events: none;
+		opacity: 0;
+		transition: opacity 0.3s;
+		z-index: 1000;
+	}
+
+	.node {
+		cursor: pointer;
+	}
+
+	.link {
+		stroke: #999;
+		stroke-opacity: 0.6;
+	}
+
+	.node text {
+		font-size: 12px;
+		pointer-events: none;
+		text-shadow:
+			0 1px 0 #fff,
+			1px 0 0 #fff,
+			0 -1px 0 #fff,
+			-1px 0 0 #fff;
+	}
+</style>

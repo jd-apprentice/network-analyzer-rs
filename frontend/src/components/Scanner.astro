@@ -1,0 +1,136 @@
+---
+let ip = "127.0.0.1";
+let ports = "80,443,8080";
+let speed = "3";
+let timeout = "1000";
+let result = "";
+
+const scanNetwork = async () => {
+    try {
+        const response = await fetch("http://localhost:8080/api/scan", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                ip: ip,
+                ports: ports,
+                speed: parseInt(speed),
+                timeout: parseInt(timeout),
+            }),
+        });
+        const data = await response.json();
+        result = JSON.stringify(data, null, 2);
+    } catch (error) {
+        result = `Error: ${error?.message}`;
+    }
+};
+---
+
+<div class="scanner-container">
+    <h2>Network Scanner</h2>
+    <div class="input-group">
+        <label for="ip">IP Address:</label>
+        <input
+            type="text"
+            id="ip"
+            value={ip}
+            oninput={(e) => (ip = e.target.value)}
+        />
+    </div>
+    <div class="input-group">
+        <label for="ports">Ports (comma-separated):</label>
+        <input
+            type="text"
+            id="ports"
+            value={ports}
+            oninput={(e) => (ports = e.target.value)}
+        />
+    </div>
+    <div class="input-group">
+        <label for="speed">Speed (1-5):</label>
+        <input
+            type="number"
+            id="speed"
+            value={speed}
+            oninput={(e) => (speed = e.target.value)}
+            min="1"
+            max="5"
+        />
+    </div>
+    <div class="input-group">
+        <label for="timeout">Timeout (ms):</label>
+        <input
+            type="number"
+            id="timeout"
+            value={timeout}
+            oninput={(e) => (timeout = e.target.value)}
+        />
+    </div>
+    <button onclick={scanNetwork}>Scan</button>
+    <pre class="result-box">{result}</pre>
+</div>
+
+<style>
+    .scanner-container {
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        max-width: 500px;
+        margin: 20px auto;
+    }
+
+    h2 {
+        color: #111827;
+        text-align: center;
+        margin-bottom: 20px;
+    }
+
+    .input-group {
+        margin-bottom: 15px;
+    }
+
+    .input-group label {
+        display: block;
+        margin-bottom: 5px;
+        color: #333;
+    }
+
+    .input-group input[type="text"],
+    .input-group input[type="number"] {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        box-sizing: border-box;
+    }
+
+    button {
+        width: 100%;
+        padding: 10px;
+        background: linear-gradient(83.21deg, #3245ff 0%, #bc52ee 100%);
+        color: white;
+        border: none;
+        border-radius: 5px;
+        font-size: 16px;
+        cursor: pointer;
+        transition: background 0.3s ease;
+    }
+
+    button:hover {
+        background: linear-gradient(83.21deg, #2a3bed 0%, #a742d4 100%);
+    }
+
+    .result-box {
+        background: #f4f4f4;
+        border: 1px solid #ddd;
+        padding: 15px;
+        border-radius: 5px;
+        margin-top: 20px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        min-height: 100px;
+        color: #333;
+    }
+</style>
